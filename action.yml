@@ -1,0 +1,104 @@
+name: Atlas Plan
+description: >-
+  Run `atlas preflight` and `atlas config plan` against an Atlas instance and
+  report drift between a committed config directory and the live instance.
+  Read-only: nothing is applied.
+author: Atlas
+branding:
+  icon: git-pull-request
+  color: purple
+
+inputs:
+  api-url:
+    description: Base URL of the instance Backend API (e.g. https://api.atlasauth.net).
+    required: true
+  management-key:
+    description: Instance secret key (sk_...). Pass it from a secret. Exposed to the CLI as ATLAS_SECRET_KEY.
+    required: true
+  dir:
+    description: Config directory to compare (relative to the repo root).
+    required: false
+    default: ./atlas-config
+  format:
+    description: Serialization format of the config files, json or yaml.
+    required: false
+    default: json
+  prune:
+    description: When "true", also plan the deletion of live resources absent from the directory.
+    required: false
+    default: "false"
+  fail-on-drift:
+    description: When "true", the step fails if the plan has any change.
+    required: false
+    default: "true"
+  preflight-fail-on:
+    description: Preflight severity that fails the step, "error" or "warning". Use "none" to skip preflight.
+    required: false
+    default: error
+  cli-version:
+    description: The @atlasauth/cli version (npm dist-tag or exact version) to run.
+    required: false
+    default: latest
+  node-version:
+    description: Node.js version to set up.
+    required: false
+    default: "20"
+
+outputs:
+  drift:
+    description: '"true" when the plan has changes.'
+    value: ${{ steps.plan.outputs.drift }}
+  preflight-ok:
+    description: '"true" when preflight passed (or was skipped).'
+    value: ${{ steps.preflight.outputs.ok }}
+
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-node@v4
+      with:
+        node-version: ${{ inputs.node-version }}
+
+    - name: Preflight
+      id: preflight
+      shell: bash
+      env:
+        ATLAS_API_BASE: ${{ inputs.api-url }}
+        ATLAS_SECRET_KEY: ${{ inputs.management-key }}
+        ATLAS_CLI_VERSION: ${{ inputs.cli-version }}
+        FAIL_ON: ${{ inputs.preflight-fail-on }}
+      run: |
+        set -uo pipefail
+        if [ "$FAIL_ON" = "none" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; exit 0; fi
+        out="$(npx --yes "@atlasauth/cli@${ATLAS_CLI_VERSION}" preflight --fail-on "$FAIL_ON" 2>&1)"; rc=$?
+        { echo '### Atlas preflight'; echo '```'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        echo "$out"
+        if [ $rc -eq 0 ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; fi
+        exit $rc
+
+    - name: Plan
+      id: plan
+      if: ${{ always() }}
+      shell: bash
+      env:
+        ATLAS_API_BASE: ${{ inputs.api-url }}
+        ATLAS_SECRET_KEY: ${{ inputs.management-key }}
+        ATLAS_CLI_VERSION: ${{ inputs.cli-version }}
+        ATLAS_DIR: ${{ inputs.dir }}
+        ATLAS_FORMAT: ${{ inputs.format }}
+        ATLAS_PRUNE: ${{ inputs.prune }}
+        FAIL_ON_DRIFT: ${{ inputs.fail-on-drift }}
+      run: |
+        set -uo pipefail
+        flags=(config plan --dir "$ATLAS_DIR" --format "$ATLAS_FORMAT" --exit-code)
+        if [ "$ATLAS_PRUNE" = "true" ]; then flags+=(--prune); fi
+        out="$(npx --yes "@atlasauth/cli@${ATLAS_CLI_VERSION}" "${flags[@]}" 2>&1)"; rc=$?
+        { echo '### Atlas config plan'; echo '```diff'; echo "$out"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+        echo "$out"
+        if [ $rc -eq 2 ]; then
+          echo "drift=true" >> "$GITHUB_OUTPUT"
+          if [ "$FAIL_ON_DRIFT" = "true" ]; then exit 1; fi
+          exit 0
+        fi
+        if [ $rc -eq 0 ]; then echo "drift=false" >> "$GITHUB_OUTPUT"; fi
+        exit $rc
